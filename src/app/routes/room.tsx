@@ -9,21 +9,28 @@ export const Room = () => {
   const params = useParams()
   const [searchParams] = useSearchParams()
   const live = searchParams.get("live") !== null
+  const headlessParam = searchParams.get("bench-headless")
+  const headless =
+    headlessParam !== null &&
+    headlessParam !== "0" &&
+    headlessParam.toLowerCase?.() !== "false"
 
   return (
     <Connection key={params.roomId}>
       <StatusBar />
-      <main className="container max-w-7xl mx-auto grid grid-cols-1 md:grid-cols-5 gap-4 p-4 flex-1 min-h-0">
-        <IsomorphicTree
-          className={cn(
-            "col-span-1 md:col-span-3 max-h-[500px] md:max-h-full min-h-0",
-            live && "md:col-span-5"
-          )}
-        />
-        <OpLog
-          className={cn("col-span-1 md:col-span-2 min-h-0", live && "hidden")}
-        />
-      </main>
+      {!headless && (
+        <main className="container max-w-7xl mx-auto grid grid-cols-1 md:grid-cols-5 gap-4 p-4 flex-1 min-h-0">
+          <IsomorphicTree
+            className={cn(
+              "col-span-1 md:col-span-3 max-h-[500px] md:max-h-full min-h-0",
+              live && "md:col-span-5"
+            )}
+          />
+          <OpLog
+            className={cn("col-span-1 md:col-span-2 min-h-0", live && "hidden")}
+          />
+        </main>
+      )}
     </Connection>
   )
 }

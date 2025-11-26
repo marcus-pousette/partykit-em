@@ -12,9 +12,11 @@ export type BenchScenario = {
   expectedNodes?: number
 }
 
-type ModeName = "noop" | "local"
+type ModeName = "noop" | "local-opfs" | "local-mem"
 
-const modes: ModeName[] = ["noop", "local"]
+const modes: ModeName[] = ["noop", "local-opfs", "local-mem"]
+const defaultSizes = [1e2, 1e3, 1e4]
+const defaultSizeOptions = defaultSizes.map((size) => ({ size }))
 
 const moveSubtreeSizes: Record<ModeName, Array<{ size: number; skip?: boolean }>> = {
   noop: [
@@ -23,7 +25,12 @@ const moveSubtreeSizes: Record<ModeName, Array<{ size: number; skip?: boolean }>
     { size: 100000 },
     { size: 1000000, skip: true },
   ],
-  local: [
+  "local-opfs": [
+    { size: 1000 },
+    { size: 10000 },
+    { size: 100000 },
+  ],
+  "local-mem": [
     { size: 1000 },
     { size: 10000 },
     { size: 100000 },
@@ -37,7 +44,13 @@ const deepChainSizes: Record<ModeName, Array<{ size: number; minDepth?: number; 
       { size: 10000, minDepth: 10 },
       { size: 100000, minDepth: 12 },
     ],
-    local: [
+    "local-opfs": [
+      { size: 1000 },
+      { size: 10000 },
+      { size: 50000 },
+      { size: 100000 },
+    ],
+    "local-mem": [
       { size: 1000 },
       { size: 10000 },
       { size: 50000 },
@@ -47,17 +60,20 @@ const deepChainSizes: Record<ModeName, Array<{ size: number; minDepth?: number; 
 
 const fanoutSizes: Record<ModeName, Array<{ size: number; skip?: boolean }>> = {
   noop: [{ size: 10000 }],
-  local: [{ size: 10000 }],
+  "local-opfs": [{ size: 10000 }],
+  "local-mem": [{ size: 10000 }],
 }
 
 const insertChainSizes: Record<ModeName, Array<{ size: number }>> = {
-  noop: [{ size: 10 }, { size: 100 }, { size: 1000 }],
-  local: [{ size: 10 }, { size: 100 }, { size: 1000 }],
+    noop: defaultSizeOptions,
+  "local-opfs": defaultSizeOptions,
+  "local-mem": defaultSizeOptions,
 }
 
 const bulkInsertBatchSizes: Record<ModeName, Array<{ size: number; skip?: boolean }>> = {
-  noop: [{ size: 100 }, { size: 1000 }, { size: 10000 }],
-  local: [{ size: 100 }, { size: 1000 }, { size: 10000 }],
+  noop: defaultSizeOptions,
+  "local-opfs": defaultSizeOptions,
+  "local-mem": defaultSizeOptions,
 }
 
 const liveScenarios: BenchScenario[] = [
@@ -106,7 +122,7 @@ const generatedScenarios: BenchScenario[] = modes
       scenarios.push(createFanout(mode, size, { skip }))
     })
 
-    if (mode === "local") {
+    if (mode.startsWith("local")) {
       scenarios.push(createRootExpand(mode))
     }
 
@@ -406,16 +422,20 @@ function createRootExpand(mode: ModeName): BenchScenario | null {
 }
 
 function pathFor(mode: ModeName, roomId: string, seedLabel?: string) {
-  return mode === "noop"
-    ? `/${roomId}?live&noop=${seedLabel ?? "default"}`
-    : `/${roomId}?live&local-only`
+  const headlessParam = process.env.BENCH_HEADLESS === "1" ? "bench-headless=1" : ""
+  if (mode === "noop") {
+    return `/${roomId}?live&noop=${seedLabel ?? "default"}${headlessParam ? `&${headlessParam}` : ""}`
+  }
+
+  const backend = mode === "local-mem" ? "memory" : "opfs"
+  return `/${roomId}?live&local-only=${backend}${headlessParam ? `&${headlessParam}` : ""}`
 }
 
 async function seedEmpty(mode: ModeName, page: Page, seedLabel?: string) {
   if (mode === "noop") {
     await seedNoop(page, seedLabel ?? "empty")
     await expectNodeCount(mode, page, 0)
-  } else if (mode === "local") {
+  } else {
     const seeded = await seedLocal(page, { size: 0, shape: "bfs" })
     await expectNodeCount(mode, page, seeded ?? 0)
   }
@@ -427,7 +447,7 @@ async function seedSmall(mode: ModeName, page: Page, seedLabel?: string) {
     await seedNoop(page, seedLabel ?? "small")
     await expectNodeCount(mode, page, 2)
     await ensureRootVisible(page)
-  } else if (mode === "local") {
+  } else {
     const seeded = await seedLocal(page, { size: 2, shape: "bfs" })
     await expectNodeCount(mode, page, seeded ?? 2)
   }
@@ -443,7 +463,7 @@ async function seedBfs(
     await seedNoop(page, seedLabel ?? `large-${size}`)
     await expectNodeCount(mode, page, size)
     await ensureRootVisible(page)
-  } else if (mode === "local") {
+  } else {
     const seeded = await seedLocal(page, { size, shape: "bfs" })
     await expectNodeCount(mode, page, seeded ?? size)
   }
@@ -458,7 +478,7 @@ async function seedChain(
   if (mode === "noop") {
     await seedNoop(page, seedLabel ?? `chain-${size}`)
     await expectNodeCount(mode, page, size)
-  } else if (mode === "local") {
+  } else {
     const seeded = await seedLocal(page, { size, shape: "chain" })
     await expectNodeCount(mode, page, seeded ?? size)
   }
@@ -474,7 +494,7 @@ async function seedFanout(
     await seedNoop(page, seedLabel ?? `fanout-${size}`)
     await expectNodeCount(mode, page, size + 1)
     await ensureRootVisible(page)
-  } else if (mode === "local") {
+  } else {
     const seeded = await seedLocal(page, { size, shape: "fanout" })
     await expectNodeCount(mode, page, seeded ?? size)
   }
@@ -508,12 +528,9 @@ async function applyMoves(
     return
   }
 
-  if (mode === "local") {
-    await page.evaluate(async (payload) => {
-      await window.__local?.applyMoves?.(payload)
-    }, moves)
-    return
-  }
+  await page.evaluate(async (payload) => {
+    await window.__local?.applyMoves?.(payload)
+  }, moves)
 }
 
 async function getParent(mode: ModeName, page: Page, nodeId: string) {
@@ -521,10 +538,7 @@ async function getParent(mode: ModeName, page: Page, nodeId: string) {
     return page.evaluate((id) => window.__bench?.getParent?.(id) ?? null, nodeId)
   }
 
-  if (mode === "local") {
-    return page.evaluate((id) => window.__local?.getParent?.(id) ?? null, nodeId)
-  }
-  return null
+  return page.evaluate((id) => window.__local?.getParent?.(id) ?? null, nodeId)
 }
 
 async function pickMoveTarget(mode: ModeName, page: Page, movingId: string) {
@@ -567,10 +581,7 @@ async function getNodeCount(mode: ModeName, page: Page) {
   if (mode === "noop") {
     return page.evaluate(() => window.__bench?.getNodeCount?.() ?? 0)
   }
-  if (mode === "local") {
-    return page.evaluate(() => window.__local?.getNodeCount?.() ?? 0)
-  }
-  return 0
+  return page.evaluate(() => window.__local?.getNodeCount?.() ?? 0)
 }
 
 function ensureRootVisible(page: Page) {

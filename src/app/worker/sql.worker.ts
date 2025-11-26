@@ -18,12 +18,16 @@ function invariant(condition: unknown, message?: string) {
 }
 
 async function initSQLite(
-  room: string
+  room: string,
+  backend: "opfs" | "memory" = "opfs",
 ): Promise<{ sqlite3: SQLiteAPI; db: number }> {
   const module = await SQLiteESMFactory()
   const sqlite3 = SQLite.Factory(module)
-  const vfs = await VFS.create(room, module)
-  sqlite3.vfs_register(vfs, true)
+
+  if (backend === "opfs") {
+    const vfs = await VFS.create(room, module)
+    sqlite3.vfs_register(vfs, true)
+  }
 
   let resolve: (value: { sqlite3: SQLiteAPI; db: number }) => void = () => {}
   let reject: (reason?: any) => void = () => {}
@@ -38,7 +42,7 @@ async function initSQLite(
     let lastError: any = null
     for (let attempt = 0; attempt < 3; attempt++) {
       try {
-        const db = await sqlite3.open_v2(room)
+        const db = await sqlite3.open_v2(backend === "memory" ? ":memory:" : room)
         resolve({ sqlite3, db })
 
         // Keep the lock for another second.
@@ -93,8 +97,8 @@ async function setup() {
 
     switch (action.type) {
       case "init": {
-        const { room } = action
-        const { sqlite3, db } = await initSQLite(room)
+        const { room, backend } = action
+        const { sqlite3, db } = await initSQLite(room, backend ?? "opfs")
         driver = new SqliteDriver(sqlite3, db)
 
         await driver.createTables()

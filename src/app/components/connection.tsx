@@ -111,7 +111,14 @@ export const Connection = ({ children }: ConnectionProps) => {
       : import.meta.env.VITE_BENCH_NOOP === "true"
         ? "default"
         : null
-  const localOnly = searchParams.get("local-only") !== null
+  const localOnlyParam = searchParams.get("local-only")
+  const localOnly = localOnlyParam !== null
+  const localBackend =
+    localOnlyParam === null || localOnlyParam.length === 0
+      ? "opfs"
+      : localOnlyParam === "memory"
+        ? "memory"
+        : "opfs"
   const benchHooks = useMemo(
     () =>
       noop
@@ -182,7 +189,7 @@ export const Connection = ({ children }: ConnectionProps) => {
         pendingCallbacks.set(action.id, resolve)
       })
 
-    waitForResult(init(room)).then(({ lastSyncTimestamp }) => {
+    waitForResult(init(room, localBackend)).then(({ lastSyncTimestamp }) => {
       setWorkerInitialized(true)
       workerInitializedRef.current = true
 

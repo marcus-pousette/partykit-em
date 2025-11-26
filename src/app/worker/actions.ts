@@ -21,10 +21,11 @@ export const clear = () => ({
   id: nanoid(),
 })
 
-export const init = (room: string) => ({
+export const init = (room: string, backend?: "opfs" | "memory") => ({
   type: "init" as const,
   id: nanoid(),
   room,
+  backend,
 })
 
 export const close = () => ({
