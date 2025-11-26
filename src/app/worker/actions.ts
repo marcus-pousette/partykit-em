@@ -11,6 +11,9 @@ type ActionResults = {
   init: {
     lastSyncTimestamp: string | null
   }
+  seedTree: number
+  getParent: string | null
+  getNodeCount: number
 }
 
 export const clear = () => ({
@@ -84,6 +87,23 @@ export const acknowledgeMoves = (
   syncTimestamp,
 })
 
+export const seedTree = (options: { size: number; shape?: "bfs" | "chain" | "fanout" }) => ({
+  type: "seedTree" as const,
+  id: nanoid(),
+  options,
+})
+
+export const getParent = (nodeId: string) => ({
+  type: "getParent" as const,
+  id: nanoid(),
+  nodeId,
+})
+
+export const getNodeCount = () => ({
+  type: "getNodeCount" as const,
+  id: nanoid(),
+})
+
 export type Action =
   | ReturnType<typeof init>
   | ReturnType<typeof clear>
@@ -96,6 +116,9 @@ export type Action =
   | ReturnType<typeof insertVerbatim>
   | ReturnType<typeof lastSyncTimestamp>
   | ReturnType<typeof acknowledgeMoves>
+  | ReturnType<typeof seedTree>
+  | ReturnType<typeof getParent>
+  | ReturnType<typeof getNodeCount>
 
 export type ActionResult<A extends Action> =
   A["type"] extends keyof ActionResults ? ActionResults[A["type"]] : never

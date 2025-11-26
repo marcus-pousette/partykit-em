@@ -6,6 +6,7 @@ import { subtree } from "../worker/actions"
 import type { Node } from "./types"
 
 type NodeWithChildRefs = Omit<Node, "children"> & {
+  parent_id?: string
   children?: Array<string>
   hasChildren?: boolean
   loading?: boolean
@@ -17,6 +18,17 @@ export const localTreeState = proxy<{ [id: string]: NodeWithChildRefs }>({
     loading: false,
   },
 })
+
+export const resetLocalTreeState = () => {
+  for (const key of Object.keys(localTreeState)) {
+    // biome-ignore lint/performance/noDelete: simple reset
+    delete (localTreeState as any)[key]
+  }
+  localTreeState.ROOT = {
+    id: "ROOT",
+    loading: false,
+  }
+}
 
 export const useLocalTree = () => {
   const { worker } = useConnection()
@@ -141,6 +153,8 @@ export const insertIntoLocalTree = (move: MoveOperation) => {
     ? localTreeState[move.old_parent_id]
     : null
   const parent = localTreeState[move.new_parent_id]
+
+  node.parent_id = move.new_parent_id
 
   if (oldParent?.children) {
     oldParent.children = oldParent.children?.filter(

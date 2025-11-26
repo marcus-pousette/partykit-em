@@ -3,8 +3,16 @@ import * as CRDT from "../shared/crdt"
 import * as Messages from "../shared/messages"
 import type { Message } from "../shared/messages"
 import type { MoveOperation } from "../shared/operation"
+import { sql } from "../shared/sql"
 import { PostgresDriver } from "../shared/pg-driver"
 import { RoomStatus } from "../shared/room-status"
+
+type BenchSeedOptions = { size: number; shape?: "bfs" | "chain" | "fanout" }
+type BenchMessage =
+  | { type: "bench:seed"; options: BenchSeedOptions }
+  | { type: "bench:applyMoves"; moves: MoveOperation[] }
+  | { type: "bench:getParent"; nodeId: string }
+  | { type: "bench:getNodeCount" }
 
 export default class Server implements Party.Server {
   // biome-ignore lint/style/noNonNullAssertion: <explanation>
@@ -131,7 +139,7 @@ export default class Server implements Party.Server {
       })
 
     if (req.method === "POST") {
-      const message = (await req.json()) as Message
+      const message = (await req.json()) as Message | BenchMessage
 
       switch (message.type) {
         case "push": {
@@ -227,6 +235,26 @@ export default class Server implements Party.Server {
           return this.json(nodes)
         }
 
+        case "bench:seed": {
+          await benchSeed(this.driver, message.options)
+          return this.json({ ok: true })
+        }
+
+        case "bench:applyMoves": {
+          await benchApplyMoves(this.driver, message.moves)
+          return this.json({ ok: true })
+        }
+
+        case "bench:getParent": {
+          const parent = await benchGetParent(this.driver, message.nodeId)
+          return this.json({ parent_id: parent })
+        }
+
+        case "bench:getNodeCount": {
+          const count = await benchGetNodeCount(this.driver)
+          return this.json({ count })
+        }
+
         default:
           return new Response("Not found", { status: 404 })
       }
@@ -256,6 +284,130 @@ export default class Server implements Party.Server {
       },
     })
   }
+}
+
+async function benchSeed(driver: PostgresDriver, options: BenchSeedOptions) {
+  await driver.createTables()
+
+  const nodes = generateBenchNodes(options)
+
+  await driver.transaction(async (t) => {
+    await t.executeScript(sql`
+      DELETE FROM nodes;
+      DELETE FROM payloads;
+      DELETE FROM op_log;
+    `)
+
+    const CHUNK = 2000
+    for (let i = 0; i < nodes.length; i += CHUNK) {
+      const slice = nodes.slice(i, i + CHUNK)
+      const values = slice
+        .map((n) => `('${n.id}', ${n.parent_id ? `'${n.parent_id}'` : "NULL"})`)
+        .join(",")
+
+      await t.executeScript(sql`
+        INSERT INTO nodes (id, parent_id)
+        VALUES ${values}
+        ON CONFLICT DO NOTHING;
+      `)
+    }
+
+    await t.commit()
+  })
+}
+
+async function benchApplyMoves(driver: PostgresDriver, moves: MoveOperation[]) {
+  const timestamped = moves.map((move) => ({
+    ...move,
+    sync_timestamp: move.sync_timestamp ?? new Date().toISOString(),
+  }))
+  await CRDT.insertMoveOperations(driver, timestamped)
+}
+
+async function benchGetParent(driver: PostgresDriver, nodeId: string) {
+  const result = await driver.execute<{ parent_id: string }>(sql`
+    SELECT parent_id FROM nodes WHERE id = '${nodeId}' LIMIT 1
+  `)
+  return result[0]?.parent_id ?? null
+}
+
+async function benchGetNodeCount(driver: PostgresDriver) {
+  const result = await driver.execute<{ count: number }>(sql`
+    SELECT COUNT(1) AS count FROM nodes
+  `)
+  return Number(result[0]?.count ?? 0)
+}
+
+function generateBenchNodes(options: BenchSeedOptions) {
+  const { size, shape = "bfs" } = options
+  if (shape === "chain") return generateChain(size)
+  if (shape === "fanout") return generateFanout(size)
+  return generateBfs(size)
+}
+
+function generateBfs(total: number) {
+  const alphabet = "abcdefghijklmnopqrst".split("")
+  const nodes: Array<{ id: string; parent_id: string | null }> = [
+    { id: "ROOT", parent_id: null },
+  ]
+  const queue: string[] = []
+
+  for (const letter of alphabet) {
+    if (nodes.length >= total) break
+    nodes.push({ id: letter, parent_id: "ROOT" })
+    queue.push(letter)
+  }
+
+  while (nodes.length < total && queue.length) {
+    const parent = queue.shift()!
+    for (const letter of alphabet) {
+      if (nodes.length >= total) break
+      const id = `${parent}${letter}`
+      nodes.push({ id, parent_id: parent })
+      queue.push(id)
+    }
+  }
+
+  return nodes
+}
+
+function generateChain(total: number) {
+  const nodes: Array<{ id: string; parent_id: string | null }> = [
+    { id: "ROOT", parent_id: null },
+    { id: "a0", parent_id: "ROOT" },
+    { id: "b0", parent_id: "ROOT" },
+  ]
+  let lastA = "a0"
+  let lastB = "b0"
+  let toggle = 0
+
+  while (nodes.length < total) {
+    if (toggle % 2 === 0) {
+      const next = `a${nodes.length}`
+      nodes.push({ id: next, parent_id: lastA })
+      lastA = next
+    } else {
+      const next = `b${nodes.length}`
+      nodes.push({ id: next, parent_id: lastB })
+      lastB = next
+    }
+    toggle++
+  }
+
+  return nodes
+}
+
+function generateFanout(total: number) {
+  const nodes: Array<{ id: string; parent_id: string | null }> = [
+    { id: "ROOT", parent_id: null },
+  ]
+  for (let i = 0; i < total; i++) {
+    nodes.push({ id: `f${i}`, parent_id: "ROOT" })
+  }
+  if (total > 0) {
+    nodes.push({ id: "f0-child", parent_id: "f0" })
+  }
+  return nodes
 }
 
 Server satisfies Party.Worker

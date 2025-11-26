@@ -1,6 +1,6 @@
 import { Notifier } from "@/lib/notifier"
 import { useClientId } from "@/lib/use-client-id"
-import { insertIntoLocalTree } from "@/lib/use-local-tree"
+import { insertIntoLocalTree, resetLocalTreeState } from "@/lib/use-local-tree"
 import { insertIntoVirtualTree } from "@/lib/use-virtual-tree"
 import {
   type Action,
@@ -13,6 +13,10 @@ import {
   insertVerbatim,
   lastSyncTimestamp,
   pendingMoves,
+  seedTree,
+  getParent as getParentAction,
+  getNodeCount as getNodeCountAction,
+  subtree as workerSubtree,
 } from "@/worker/actions"
 import { useNetworkState } from "@uidotdev/usehooks"
 import { nanoid } from "nanoid/non-secure"
@@ -40,6 +44,27 @@ import type { Node } from "../../shared/node"
 import type { MoveOperation } from "../../shared/operation"
 import * as Timing from "../lib/timing"
 import SQLWorker from "../worker/sql.worker?worker"
+import { createBenchHooks } from "../lib/bench-hooks"
+
+declare global {
+  interface Window {
+    __bench?: {
+      applyMoves: (moves: MoveOperation[]) => void
+      snapshot: () => Record<string, any>
+      getParent: (id: string) => string | null
+      getNodeCount: () => number
+      pickMoveTarget: (movingId: string) => string
+      pickDeepTarget: (movingId: string, minDepth?: number) => string
+      seed?: (mode?: string) => void
+    }
+    __local?: {
+      seed: (options: { size: number; shape?: "bfs" | "chain" | "fanout" }) => Promise<void>
+      applyMoves: (moves: MoveOperation[]) => Promise<void>
+      getParent: (id: string) => Promise<string | null>
+      getNodeCount: () => Promise<number>
+    }
+  }
+}
 
 export interface ConnectionContext {
   connected: boolean
@@ -77,6 +102,23 @@ export const Connection = ({ children }: ConnectionProps) => {
   const room = useParams().roomId ?? nanoid()
   const [searchParams] = useSearchParams()
   const live = searchParams.get("live") !== null
+  const noopParam = searchParams.get("noop")
+  const noop =
+    noopParam !== null || import.meta.env.VITE_BENCH_NOOP === "true"
+  const noopMode =
+    noopParam && noopParam.length > 0
+      ? noopParam
+      : import.meta.env.VITE_BENCH_NOOP === "true"
+        ? "default"
+        : null
+  const localOnly = searchParams.get("local-only") !== null
+  const benchHooks = useMemo(
+    () =>
+      noop
+        ? createBenchHooks({ mode: noopMode ?? "default", targetCount: 1000 })
+        : null,
+    [noop, noopMode],
+  )
 
   const { clientId } = useClientId()
 
@@ -93,6 +135,24 @@ export const Connection = ({ children }: ConnectionProps) => {
 
   // biome-ignore lint/correctness/useExhaustiveDependencies: <explanation>
   const worker = useMemo(() => {
+    if (noop) {
+      benchHooks?.seed?.()
+
+      workerInitializedRef.current = true
+      setWorkerInitialized(true)
+
+      if (typeof window !== "undefined") {
+        window.__bench = benchHooks ?? undefined
+      }
+
+      return {
+        instance: null as unknown as InstanceType<typeof SQLWorker>,
+        waitForResult: async <A extends Action & { id: string }>(
+          _action: A,
+        ): Promise<ActionResult<A>> => undefined as ActionResult<A>,
+      }
+    }
+
     const worker = new SQLWorker()
     const { port1, port2 } = new MessageChannel()
 
@@ -126,7 +186,7 @@ export const Connection = ({ children }: ConnectionProps) => {
       setWorkerInitialized(true)
       workerInitializedRef.current = true
 
-      if (lastSyncTimestamp) {
+      if (lastSyncTimestamp || localOnly) {
         setHydrated(true)
       }
     })
@@ -143,12 +203,51 @@ export const Connection = ({ children }: ConnectionProps) => {
     })
 
     return { instance: worker, waitForResult }
-  }, [])
+  }, [noop, room, benchHooks, localOnly])
+
+  const localHooks = useMemo(() => {
+    if (!localOnly) return null
+    const waitReady = async () => {
+      while (!workerInitializedRef.current) {
+        await new Promise((r) => setTimeout(r, 10))
+      }
+    }
+    return {
+      seed: async (options: { size: number; shape?: "bfs" | "chain" | "fanout" }) => {
+        await waitReady()
+        resetLocalTreeState()
+        return worker.waitForResult(seedTree(options))
+      },
+      applyMoves: async (moves: MoveOperation[]) => {
+        await waitReady()
+        moves.forEach(insertIntoLocalTree)
+        await worker.waitForResult(insertMoves(moves))
+      },
+      getParent: async (id: string) => {
+        await waitReady()
+        return worker.waitForResult(getParentAction(id))
+      },
+      getNodeCount: async () => {
+        await waitReady()
+        return worker.waitForResult(getNodeCountAction())
+      },
+    }
+  }, [localOnly, worker])
+
+  useEffect(() => {
+    if (localOnly) {
+      window.__local = localHooks ?? undefined
+    } else {
+      window.__local = undefined
+    }
+  }, [localOnly, localHooks])
 
   /**
    * Pull moves from the server.
    */
   const pullMoves = useCallback(async () => {
+    if (noop || localOnly) return
+
     const syncTimestamp = await worker.waitForResult(
       lastSyncTimestamp(clientId),
     )
@@ -270,12 +369,14 @@ export const Connection = ({ children }: ConnectionProps) => {
       reader.releaseLock()
       Notifier.notify()
     }
-  }, [room, worker, clientId])
+  }, [room, worker, clientId, noop, localOnly])
 
   /**
    * Perform a full sync with the server, copying tables directly.
    */
   const performFullSync = useCallback(async () => {
+    if (noop || localOnly) return
+
     let total = -1
 
     // Get total number of nodes and operations
@@ -446,13 +547,18 @@ export const Connection = ({ children }: ConnectionProps) => {
       reader.releaseLock()
       Notifier.notify()
     }
-  }, [room, worker, clientId])
+  }, [room, worker, clientId, noop, localOnly])
 
   /**
    * Fetch a subtree from the server.
    */
   const fetchSubtree = useCallback(
     async (id: string, depth = 1) => {
+      if (localOnly) {
+        return worker.waitForResult(workerSubtree(id))
+      }
+      if (noop && benchHooks?.fetchSubtree) return benchHooks.fetchSubtree(id, depth)
+
       const start = performance.now()
       const nodes = await fetch(
         `${import.meta.env.VITE_PARTYKIT_HOST}/parties/main/${room}`,
@@ -476,87 +582,92 @@ export const Connection = ({ children }: ConnectionProps) => {
 
       return nodes
     },
-    [room],
+    [room, noop, benchHooks, localOnly, worker],
   )
 
-  const socket = usePartySocket({
-    room: room,
-    id: clientId,
-    host: import.meta.env.VITE_PARTYKIT_HOST,
-    onClose() {
-      setConnected(false)
-      setClients([])
-      setStatus(null)
-    },
-    async onOpen() {
-      setConnected(true)
+  const socket = noop || localOnly
+    ? { reconnect: () => {}, close: () => {} }
+    : usePartySocket({
+        room: room,
+        id: clientId,
+        host: import.meta.env.VITE_PARTYKIT_HOST,
+        onClose() {
+          setConnected(false)
+          setClients([])
+          setStatus(null)
+        },
+        async onOpen() {
+          setConnected(true)
 
-      if (!didConnectInitially.current) {
-        didConnectInitially.current = true
+          if (!didConnectInitially.current) {
+            didConnectInitially.current = true
 
-        // Wait for the worker to initialize.
-        while (!workerInitializedRef.current) {
-          await new Promise((resolve) => setTimeout(resolve, 50))
-        }
-
-        pushPendingMoves()
-
-        if (!live) {
-          // Check last sync timestamp
-          const lastSync = await worker.waitForResult(
-            lastSyncTimestamp(clientId),
-          )
-
-          if (lastSync) {
-            // Pull moves from the server.
-            await pullMoves()
-          } else {
-            // Full sync
-            await performFullSync()
-          }
-        }
-      }
-    },
-    async onMessage(evt) {
-      try {
-        const data = JSON.parse(evt.data || "{}") as Message
-
-        switch (data.type) {
-          case "status": {
-            setStatus(data.status)
-            break
-          }
-
-          case "connections": {
-            setClients(data.clients)
-            break
-          }
-
-          case "push": {
-            Timing.timestamp("push:receive")
-
-            const moveOps = data.operations.filter(
-              (op): op is MoveOperation => op.type === "MOVE",
-            )
-            for (const move of moveOps) {
-              if (live || !hydrated) {
-                insertIntoVirtualTree(move)
-              } else insertIntoLocalTree(move)
+            // Wait for the worker to initialize.
+            while (!workerInitializedRef.current) {
+              await new Promise((resolve) => setTimeout(resolve, 50))
             }
-            await worker.waitForResult(insertMoves(moveOps))
-            Notifier.notify()
-            break
-          }
 
-          default:
-            console.log("Unknown message type", data)
-            break
-        }
-      } catch (error) {
-        console.error("Error parsing message", error)
-      }
-    },
-  })
+            pushPendingMoves()
+
+            if (!live) {
+              // Check last sync timestamp
+              const lastSync = await worker.waitForResult(
+                lastSyncTimestamp(clientId),
+              )
+
+              if (lastSync) {
+                // Pull moves from the server.
+                await pullMoves()
+              } else {
+                // Full sync
+                // await performFullSync()
+
+                // TODO: Switch back to copy-stream-based full sync, we're debugging plain CRDT performance.
+                await pullMoves()
+              }
+            }
+          }
+        },
+        async onMessage(evt) {
+          try {
+            const data = JSON.parse(evt.data || "{}") as Message
+
+            switch (data.type) {
+              case "status": {
+                setStatus(data.status)
+                break
+              }
+
+              case "connections": {
+                setClients(data.clients)
+                break
+              }
+
+              case "push": {
+                Timing.timestamp("push:receive")
+
+                const moveOps = data.operations.filter(
+                  (op): op is MoveOperation => op.type === "MOVE",
+                )
+                for (const move of moveOps) {
+                  if (live || !hydrated) {
+                    insertIntoVirtualTree(move)
+                  } else insertIntoLocalTree(move)
+                }
+                await worker.waitForResult(insertMoves(moveOps))
+                Notifier.notify()
+                break
+              }
+
+              default:
+                console.log("Unknown message type", data)
+                break
+            }
+          } catch (error) {
+            console.error("Error parsing message", error)
+          }
+        },
+      })
 
   const { online } = useNetworkState()
 
@@ -570,6 +681,13 @@ export const Connection = ({ children }: ConnectionProps) => {
 
   const pushMoves = useCallback(
     async (moves: MoveOperation[]) => {
+      if (noop || localOnly) {
+        await worker.waitForResult(
+          acknowledgeMoves(moves, new Date().toISOString()),
+        )
+        return
+      }
+
       Timing.timestamp("push:send")
 
       const { sync_timestamp } = await fetch(
@@ -592,29 +710,33 @@ export const Connection = ({ children }: ConnectionProps) => {
       await worker.waitForResult(acknowledgeMoves(moves, sync_timestamp))
       Notifier.notify()
     },
-    [room, worker],
+    [room, worker, noop, localOnly],
   )
 
   /**
    * Push pending moves to the server.
    */
   const pushPendingMoves = useCallback(async () => {
+    if (noop || localOnly) return
+
     const moves = await worker.waitForResult(pendingMoves(clientId))
 
     if (moves.length > 0) {
       await pushMoves(moves)
     }
-  }, [pushMoves, worker, clientId])
+  }, [pushMoves, worker, clientId, noop, localOnly])
 
   useEffect(() => {
+    if (noop) return
     if (hydrated) {
       // Race with subtree fetch
       Timing.measureOnce("interactive")
     }
-  }, [hydrated])
+  }, [hydrated, noop])
 
   // biome-ignore lint/correctness/useExhaustiveDependencies: <explanation>
   useEffect(() => {
+    if (noop || localOnly) return
     if (online) {
       /**
        * When reconnecting, push and pull moves.
@@ -637,24 +759,30 @@ export const Connection = ({ children }: ConnectionProps) => {
       setClients([])
       setStatus(null)
     }
-  }, [online, live])
+  }, [online, live, noop, localOnly])
 
   const value = useMemo(
     () => ({
       connected,
-      hydrated: hydrated && !live,
+      hydrated: noop ? false : localOnly ? true : hydrated && !live,
       status,
       clients,
       clientId,
-      worker: { ...worker, initialized: workerInitialized },
+      worker: { ...worker, initialized: noop ? true : workerInitialized },
       timestamp,
       lastSyncTimestamp: lastServerSyncTimestamp,
       pushMoves,
-      fetchSubtree,
+      fetchSubtree: noop
+        ? async () => {
+            return []
+          }
+        : fetchSubtree,
     }),
     [
       connected,
       hydrated,
+      noop,
+      localOnly,
       status,
       clients,
       worker,

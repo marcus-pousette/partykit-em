@@ -34,7 +34,9 @@ export const StatusBar = () => {
           </div>
         </div>
 
-        <div className="text-sm font-semibold">Status: {status}</div>
+        <div className="text-sm font-semibold" data-testid="status-text">
+          Status: {status}
+        </div>
 
         <div className="text-sm font-semibold flex items-center gap-4">
           <TooltipProvider>

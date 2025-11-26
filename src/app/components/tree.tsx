@@ -171,7 +171,7 @@ export const Tree = ({ className, virtual, tree, onToggle }: TreeProps) => {
         onDelete={onDelete}
         onToggle={onToggle}
         openByDefault={false}
-        initialOpenState={{ ROOT: true }}
+        initialOpenState={{}}
       >
         {TreeNode}
       </Arborist>

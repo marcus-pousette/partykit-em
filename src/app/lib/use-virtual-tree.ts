@@ -5,6 +5,7 @@ import type { MoveOperation } from "../../shared/operation"
 import type { Node } from "./types"
 
 type NodeWithChildRefs = Omit<Node, "children"> & {
+  parent_id?: string
   children?: Array<string>
   loading?: boolean
 }
@@ -61,23 +62,39 @@ export const useVirtualTree = () => {
   )
 
   const tree = useMemo(() => {
-    // Traverse down the tree and resolve the children
-    const getNodeWithChildren = (id: string): Node => {
-      const node = snapshot[id]
+    const root = snapshot.ROOT
+    if (!root) return []
 
-      if (node.children)
-        return {
-          ...node,
-          children: node.children.map((child) => getNodeWithChildren(child)),
-        }
+    // Build the tree iteratively to avoid call-stack overflows on deep chains.
+    const rootNode: Node = { ...root, children: [] }
+    const stack: Array<{ id: string; node: Node }> = [{ id: "ROOT", node: rootNode }]
+    const visited = new Set<string>(["ROOT"])
 
-      return {
-        ...node,
-        children: undefined,
+    while (stack.length) {
+      const { id, node } = stack.pop()!
+      const childIds = snapshot[id]?.children ?? []
+      if (!childIds.length) {
+        node.children = undefined
+        continue
+      }
+
+      node.children = []
+      for (const childId of childIds) {
+        if (visited.has(childId)) continue
+        visited.add(childId)
+        const childSnapshot = snapshot[childId]
+        if (!childSnapshot) continue
+        const childNode: Node = { ...childSnapshot, children: [] }
+        node.children.push(childNode)
+        stack.push({ id: childId, node: childNode })
+      }
+
+      if (!node.children.length) {
+        node.children = undefined
       }
     }
 
-    return [getNodeWithChildren("ROOT")]
+    return [rootNode]
   }, [snapshot])
 
   useEffect(() => {
@@ -112,11 +129,15 @@ export const insertIntoVirtualTree = (move: MoveOperation) => {
   const oldParent = move.old_parent_id ? state[move.old_parent_id] : null
   const parent = state[move.new_parent_id]
 
+  node.parent_id = move.new_parent_id
+
   if (oldParent?.children) {
-    oldParent.children = oldParent.children?.filter(
-      (child) => child !== node.id,
-    )
+    oldParent.children = oldParent.children.filter((child) => child !== node.id)
+    if (!oldParent.children.length) {
+      oldParent.children = []
+    }
   }
 
-  if (parent.children) parent.children.push(node.id)
+  if (!parent.children) parent.children = []
+  if (!parent.children.includes(node.id)) parent.children.push(node.id)
 }

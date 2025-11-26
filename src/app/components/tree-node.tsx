@@ -50,6 +50,7 @@ export const TreeNode = (props: NodeRendererProps<VirtualNode>) => {
 
   return (
     <div
+      data-testid={`tree-node-${node.id}`}
       className="flex flex-row items-center gap-2 font-mono font-semibold group py-1"
       style={style}
       ref={dragHandle}
@@ -76,6 +77,7 @@ export const TreeNode = (props: NodeRendererProps<VirtualNode>) => {
 
       <div className="flex flex-row items-center gap-1">
         <div
+          data-testid={`add-child-${node.id}`}
           className="opacity-0 group-hover:opacity-100 transition-opacity p-1 cursor-pointer"
           onClick={() =>
             tree.create({

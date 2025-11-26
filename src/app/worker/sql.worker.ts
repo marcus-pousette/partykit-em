@@ -123,7 +123,6 @@ async function setup() {
 
       case "clear": {
         invariant(driver)
-
         await driver.transaction(async (t) => {
           await driver.execute(sql`DROP TABLE op_log`)
           await driver.execute(sql`DROP TABLE nodes`)
@@ -137,7 +136,6 @@ async function setup() {
 
       case "tree": {
         invariant(driver)
-
         const result = await driver.execute(sql`
           WITH RECURSIVE tree AS (
             -- Base case: start with root node
@@ -304,6 +302,71 @@ async function setup() {
         return respond(action, result[0]?.sync_timestamp)
       }
 
+      case "seedTree": {
+        invariant(driver)
+
+        const { size, shape = "bfs" } = action.options
+        const nodes =
+          shape === "chain"
+            ? generateChain(size)
+            : shape === "fanout"
+              ? generateFanout(size)
+              : generateBfs(size)
+
+        await driver.transaction(async (t) => {
+          await driver.createTables()
+
+          await t.executeScript(sql`
+            DELETE FROM op_log;
+            DELETE FROM payloads;
+            DELETE FROM nodes;
+          `)
+
+          const CHUNK = 2000
+          for (let i = 0; i < nodes.length; i += CHUNK) {
+            const slice = nodes.slice(i, i + CHUNK)
+            const values = slice
+              .map((n) => `('${n.id}', ${n.parent_id ? `'${n.parent_id}'` : "NULL"})`)
+              .join(",")
+
+            await t.executeScript(sql`
+              INSERT INTO nodes (id, parent_id) VALUES ('ROOT', NULL) ON CONFLICT DO NOTHING;
+              INSERT INTO nodes (id, parent_id) VALUES ('TOMBSTONE', NULL) ON CONFLICT DO NOTHING;
+              INSERT INTO nodes (id, parent_id)
+              VALUES ${values}
+              ON CONFLICT DO NOTHING;
+            `)
+          }
+
+          await t.commit()
+        })
+
+        const count = await driver.execute<{ count: number }>(sql`
+          SELECT COUNT(1) as count FROM nodes
+        `)
+
+        return respond(action, Number(count[0]?.count ?? 0))
+      }
+
+      case "getParent": {
+        invariant(driver)
+
+        const { nodeId } = action
+        const result = await driver.execute<{ parent_id: string }>(sql`
+          SELECT parent_id FROM nodes WHERE id = '${nodeId}' LIMIT 1
+        `)
+        return respond(action, result[0]?.parent_id ?? null)
+      }
+
+      case "getNodeCount": {
+        invariant(driver)
+
+        const result = await driver.execute<{ count: number }>(sql`
+          SELECT COUNT(1) as count FROM nodes
+        `)
+        return respond(action, result[0]?.count ?? 0)
+      }
+
       default: {
         console.error("Unknown message type", event.data)
       }
@@ -314,3 +377,68 @@ async function setup() {
 }
 
 setup()
+
+function generateBfs(total: number) {
+  const alphabet = "abcdefghijklmnopqrst".split("")
+  const nodes: Array<{ id: string; parent_id: string | null }> = [
+    { id: "ROOT", parent_id: null },
+  ]
+  const queue: string[] = []
+
+  for (const letter of alphabet) {
+    if (nodes.length >= total) break
+    nodes.push({ id: letter, parent_id: "ROOT" })
+    queue.push(letter)
+  }
+
+  while (nodes.length < total && queue.length) {
+    const parent = queue.shift()!
+    for (const letter of alphabet) {
+      if (nodes.length >= total) break
+      const id = `${parent}${letter}`
+      nodes.push({ id, parent_id: parent })
+      queue.push(id)
+    }
+  }
+
+  return nodes
+}
+
+function generateChain(total: number) {
+  const nodes: Array<{ id: string; parent_id: string | null }> = [
+    { id: "ROOT", parent_id: null },
+    { id: "a0", parent_id: "ROOT" },
+    { id: "b0", parent_id: "ROOT" },
+  ]
+  let lastA = "a0"
+  let lastB = "b0"
+  let toggle = 0
+
+  while (nodes.length < total) {
+    if (toggle % 2 === 0) {
+      const next = `a${nodes.length}`
+      nodes.push({ id: next, parent_id: lastA })
+      lastA = next
+    } else {
+      const next = `b${nodes.length}`
+      nodes.push({ id: next, parent_id: lastB })
+      lastB = next
+    }
+    toggle++
+  }
+
+  return nodes
+}
+
+function generateFanout(total: number) {
+  const nodes: Array<{ id: string; parent_id: string | null }> = [
+    { id: "ROOT", parent_id: null },
+  ]
+  for (let i = 0; i < total; i++) {
+    nodes.push({ id: `f${i}`, parent_id: "ROOT" })
+  }
+  if (total > 0) {
+    nodes.push({ id: "f0-child", parent_id: "f0" })
+  }
+  return nodes
+}
