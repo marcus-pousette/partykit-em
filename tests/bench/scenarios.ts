@@ -12,6 +12,8 @@ export type BenchScenario = {
   expectedNodes?: number
 }
 
+const HEADLESS = process.env.BENCH_HEADLESS !== "0"
+
 type ModeName = "noop" | "local-opfs" | "local-mem"
 
 const modes: ModeName[] = ["noop", "local-opfs", "local-mem"]
@@ -155,6 +157,22 @@ function createInsertOne(mode: ModeName): BenchScenario | null {
       await seedEmpty(mode, page, seedLabel)
     },
     run: async (page) => {
+      if (HEADLESS) {
+        await applyMoves(mode, page, [
+          {
+            type: "MOVE",
+            node_id: `headless-${Date.now()}`,
+            old_parent_id: null,
+            new_parent_id: "ROOT",
+            client_id: "bench",
+            timestamp: new Date().toISOString(),
+          },
+        ])
+        const count = await getNodeCount(mode, page)
+        await expect(count).toBeGreaterThanOrEqual(1)
+        return
+      }
+
       await ensureRootVisible(page)
       const root = page.getByTestId("tree-node-ROOT")
       await root.locator("span").first().click()
@@ -183,8 +201,13 @@ function createMoveLeafSmall(mode: ModeName): BenchScenario | null {
       await seedSmall(mode, page, seedLabel)
     },
     run: async (page) => {
-      const root = page.getByTestId("tree-node-ROOT")
-      await root.locator("span").first().click()
+      if (!HEADLESS) {
+        await ensureRootVisible(page)
+        const root = page.getByTestId("tree-node-ROOT")
+        await root.locator("span").first().click()
+      }
+
+
 
       await applyMoves(mode, page, [
         {
@@ -207,8 +230,8 @@ function createInsertChain(mode: ModeName, size: number): BenchScenario | null {
   // Always start from an empty tree; we only want to measure the insert cost.
   const seedLabel = mode === "noop" ? "empty" : undefined
   return {
-    name: `${mode}-insert-chain-under-root-${size}`,
-    description: `Insert ${size.toLocaleString()} nodes as a single chain under ROOT`,
+    name: `${mode}-insert-chain-length-${size}`,
+    description: `Insert ${size.toLocaleString()} nodes as a single chain under ROOT (length = inserts)`,
     group: "insert",
     path: (roomId) => pathFor(mode, roomId, seedLabel),
     prepare: async (page) => {
@@ -244,8 +267,8 @@ function createBulkInsert(
 ): BenchScenario {
   const seedLabel = mode === "noop" ? "empty" : undefined
   return {
-    name: `${mode}-bulk-insert-root-siblings-single-batch-${size}`,
-    description: `Insert ${size.toLocaleString()} new siblings directly under ROOT in one batch`,
+    name: `${mode}-bulk-insert-root-siblings-batch-${size}`,
+    description: `Insert ${size.toLocaleString()} new siblings directly under ROOT in one batch (batch size = inserts)`,
     group: "insert",
     path: (roomId) => pathFor(mode, roomId, seedLabel),
     skip,
@@ -283,8 +306,8 @@ function createMoveSubtree(
 ): BenchScenario {
   const seedLabel = mode === "noop" ? `large-${size}` : undefined
   return {
-    name: `${mode}-move-subtree-root-child-into-peer-${size}`,
-    description: `Move a ROOT child into a different subtree (${size.toLocaleString()} nodes)`,
+    name: `${mode}-one-move-subtree-root-child-into-peer-tree-${size}`,
+    description: `Tree of ${size.toLocaleString()} nodes: move one ROOT child into a different subtree`,
     group: "move",
     path: (roomId) => pathFor(mode, roomId, seedLabel),
     skip,
@@ -319,14 +342,14 @@ function createDeepChain(
   const seedLabel = mode === "noop" ? `chain-${size}` : undefined
   const baseName =
     mode === "noop"
-      ? `move-root-child-into-deep-chain`
-      : `move-root-child-into-deep-chain`
+      ? `one-move-root-child-into-deep-chain-tree`
+      : `one-move-root-child-into-deep-chain-tree`
   return {
     name: `${mode}-${baseName}-${size}`,
     description:
       mode === "noop"
-        ? `Move root child into a deep descendant (${size.toLocaleString()} chain)`
-        : `${mode === "local" ? "Local-only" : "Server"}: move root child into a deep descendant (${size.toLocaleString()} chain)`,
+        ? `Tree shaped as a ${size.toLocaleString()} chain: move one root child into a deep descendant`
+        : `${mode === "local-opfs" ? "Local-only (OPFS)" : "Local-only (memory)"}: tree shaped as a ${size.toLocaleString()} chain; move one root child into a deep descendant`,
     group: "deep",
     path: (roomId) => pathFor(mode, roomId, seedLabel),
     skip,
@@ -366,8 +389,8 @@ function createFanout(
   const target = "f1"
   const movingId = "f0"
   return {
-    name: `${mode}-move-fanout-root-child-into-sibling-${size}`,
-    description: `Move a root child into a sibling within a ${size.toLocaleString()} fan-out under ROOT`,
+    name: `${mode}-one-move-fanout-root-child-into-sibling-tree-${size}`,
+    description: `Tree with ${size.toLocaleString()} root-level children: move one root child into a sibling`,
     group: "fanout",
     path: (roomId) => pathFor(mode, roomId, seedLabel),
     skip,
@@ -396,10 +419,11 @@ function createRootExpand(mode: ModeName): BenchScenario | null {
   if (mode !== "local") return null
 
   return {
-    name: `${mode}-expand-root-after-bfs-20`,
-    description: "Local-only: seed a small tree and verify ROOT can be expanded to show children",
+    name: `${mode}-expand-root-after-bfs-tree-20`,
+    description: "Local-only: seed a 20-node BFS tree and verify ROOT can be expanded to show children",
     group: "expand",
     path: (roomId) => pathFor(mode, roomId),
+    skip: HEADLESS,
     prepare: async (page) => {
       await seedBfs(mode, page, 20)
     },
@@ -422,7 +446,7 @@ function createRootExpand(mode: ModeName): BenchScenario | null {
 }
 
 function pathFor(mode: ModeName, roomId: string, seedLabel?: string) {
-  const headlessParam = process.env.BENCH_HEADLESS === "1" ? "bench-headless=1" : ""
+  const headlessParam = process.env.BENCH_HEADLESS === "0" ? "" : "bench-headless=1"
   if (mode === "noop") {
     return `/${roomId}?live&noop=${seedLabel ?? "default"}${headlessParam ? `&${headlessParam}` : ""}`
   }
@@ -585,6 +609,7 @@ async function getNodeCount(mode: ModeName, page: Page) {
 }
 
 function ensureRootVisible(page: Page) {
+  if (HEADLESS) return Promise.resolve()
   return page.getByTestId("tree-node-ROOT").waitFor({ state: "visible" })
 }
 
