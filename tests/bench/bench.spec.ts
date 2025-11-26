@@ -29,6 +29,10 @@ for (const scenario of activeScenarios) {
   })
 }
 
+test.afterEach(async () => {
+  // (Was used for OPFS teardown timing experiments; keep fast by default.)
+})
+
 test.afterAll(async () => {
   if (!results.length) {
     console.log("[bench] no scenarios matched filter")

@@ -24,6 +24,14 @@ export default defineConfig({
       "@": path.resolve(__dirname, "./src/app"),
     },
   },
+  server: {
+    headers: {
+      // Required for OPFS + synchronous access in workers.
+      "Cross-Origin-Opener-Policy": "same-origin",
+      "Cross-Origin-Embedder-Policy": "require-corp",
+      "Cross-Origin-Resource-Policy": "same-origin",
+    },
+  },
   optimizeDeps: {
     exclude: ["wa-sqlite"],
   },

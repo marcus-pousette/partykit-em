@@ -35,15 +35,23 @@ async function initSQLite(
   )
 
   navigator.locks.request(OPEN_DB_LOCK, async () => {
-    try {
-      const db = await sqlite3.open_v2(room)
-      resolve({ sqlite3, db })
+    let lastError: any = null
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        const db = await sqlite3.open_v2(room)
+        resolve({ sqlite3, db })
 
-      // Keep the lock for another second.
-      await new Promise((resolve) => setTimeout(resolve, 1000))
-    } catch (e: any) {
-      reject(e)
+        // Keep the lock for another second.
+        await new Promise((resolve) => setTimeout(resolve, 1000))
+        return
+      } catch (e: any) {
+        lastError = e
+        // Tiny backoff before retrying.
+        await new Promise((resolve) => setTimeout(resolve, 50 * (attempt + 1)))
+      }
     }
+
+    reject(lastError)
   })
 
   return promise

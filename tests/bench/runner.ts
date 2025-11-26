@@ -8,48 +8,52 @@ async function clearOriginStorage(page: Page) {
   // Ensure we are on the app origin before clearing storage.
   await page.goto("/", { waitUntil: "domcontentloaded" })
 
-  await page.evaluate(async () => {
-    try {
-      localStorage.clear()
-      sessionStorage.clear()
-    } catch (e) {
-      console.warn("Storage clear warning:", e)
-    }
-
-    // Best-effort IndexedDB cleanup.
-    try {
-      const databases = await (indexedDB as any).databases?.()
-      if (databases?.length) {
-        await Promise.all(
-          databases
-            .map((db: any) => db?.name)
-            .filter(Boolean)
-            .map(
-              (name: string) =>
-                new Promise<void>((resolve) => {
-                  const req = indexedDB.deleteDatabase(name)
-                  req.onsuccess = req.onerror = req.onblocked = () => resolve()
-                }),
-            ),
-        )
+  // Clearing origin storage between scenarios was causing intermittent OPFS failures.
+  // If you need a full wipe, set BENCH_CLEAR_STORAGE=1.
+  if (process.env.BENCH_CLEAR_STORAGE === "1") {
+    await page.evaluate(async () => {
+      try {
+        localStorage.clear()
+        sessionStorage.clear()
+      } catch (e) {
+        console.warn("Storage clear warning:", e)
       }
-    } catch (e) {
-      console.warn("IndexedDB clear warning:", e)
-    }
 
-    // Best-effort OPFS cleanup.
-    try {
-      // @ts-ignore navigator.storage.getDirectory is supported in this environment
-      const root: any = await navigator.storage.getDirectory?.()
-      if (root?.removeEntry) {
-        for await (const [name] of root.entries()) {
-          await root.removeEntry(name, { recursive: true })
+      // Best-effort IndexedDB cleanup.
+      try {
+        const databases = await (indexedDB as any).databases?.()
+        if (databases?.length) {
+          await Promise.all(
+            databases
+              .map((db: any) => db?.name)
+              .filter(Boolean)
+              .map(
+                (name: string) =>
+                  new Promise<void>((resolve) => {
+                    const req = indexedDB.deleteDatabase(name)
+                    req.onsuccess = req.onerror = req.onblocked = () => resolve()
+                  }),
+              ),
+          )
         }
+      } catch (e) {
+        console.warn("IndexedDB clear warning:", e)
       }
-    } catch (e) {
-      console.warn("OPFS clear warning:", e)
-    }
-  })
+
+      // Best-effort OPFS cleanup.
+      try {
+        // @ts-ignore navigator.storage.getDirectory is supported in this environment
+        const root: any = await navigator.storage.getDirectory?.()
+        if (root?.removeEntry) {
+          for await (const [name] of root.entries()) {
+            await root.removeEntry(name, { recursive: true })
+          }
+        }
+      } catch (e) {
+        console.warn("OPFS clear warning:", e)
+      }
+    })
+  }
 }
 
 function setupOpenV2FailFast(page: Page) {
@@ -101,11 +105,16 @@ export const runScenario = async (
   info: TestInfo,
   scenario: BenchScenario
 ) => {
-  const rawId = `${roomPrefix}-${scenario.name}-${Date.now()}`
+  // Keep room IDs short to avoid any filesystem limits in OPFS-backed storage.
+  const rawId = `${roomPrefix}-${Date.now().toString(36)}-${Math.random()
+    .toString(36)
+    .slice(2, 6)}`
   const roomId = rawId.replace(/[^a-z0-9_]/gi, "_").toLowerCase()
 
-  // Start each scenario from a clean origin (localStorage/IndexedDB/OPFS).
-  await clearOriginStorage(page)
+  // Optional: only clear storage when explicitly requested.
+  if (process.env.BENCH_CLEAR_STORAGE === "1") {
+    await clearOriginStorage(page)
+  }
 
   // Fail fast if the worker cannot open the OPFS-backed database.
   const { waitForFailure, detach } = setupOpenV2FailFast(page)
